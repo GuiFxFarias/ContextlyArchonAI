@@ -8,7 +8,7 @@ export async function GET() {
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("documents")
-      .select("id, name, created_at")
+      .select("id, name, doc_type, created_at")
       .order("created_at", { ascending: false });
 
     if (error) throw error;

@@ -6,8 +6,12 @@ create extension if not exists vector;
 create table if not exists public.documents (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  doc_type text not null default 'analysis', -- 'analysis' | 'standard'
   created_at timestamptz not null default now()
 );
+
+-- Migration for existing databases (run once in Supabase SQL Editor):
+-- ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS doc_type text NOT NULL DEFAULT 'analysis';
 
 create table if not exists public.embeddings (
   id uuid primary key default gen_random_uuid(),

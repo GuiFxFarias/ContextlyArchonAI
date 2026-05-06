@@ -10,7 +10,11 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  AlertCircle,
+  AlertTriangle,
+  BookOpen,
   BrainCircuit,
+  CheckCircle2,
   ChevronDown,
   FileText,
   FileUp,
@@ -19,6 +23,7 @@ import {
   PanelLeft,
   Plus,
   SendHorizontal,
+  ShieldCheck,
   Sparkles,
   Trash2,
   X,
@@ -41,7 +46,12 @@ import { cn } from '@/lib/utils';
 import type { RetrievalReasoning } from '@/lib/rag/reasoning';
 import { AssistantMarkdown } from '@/components/assistant-markdown';
 
-type DocumentRow = { id: string; name: string; created_at: string };
+type DocumentRow = {
+  id: string;
+  name: string;
+  doc_type: 'analysis' | 'standard';
+  created_at: string;
+};
 
 type SourceInfo = {
   id: string;
@@ -63,6 +73,23 @@ type ChatMessage = {
 
 type QueryScope = { kind: 'all' } | { kind: 'subset'; ids: string[] };
 type ExtractResult = { field: string; value: string | string[] | null };
+
+type ComplianceDivergencia = {
+  item: string;
+  esperado: string;
+  encontrado: string;
+  gravidade: 'alta' | 'media' | 'baixa';
+};
+
+type ComplianceResult = {
+  status: 'conforme' | 'parcialmente_conforme' | 'nao_conforme';
+  score: number;
+  divergencias: ComplianceDivergencia[];
+  ausencias: string[];
+  observacoes: string;
+  standardName: string;
+  analysisName: string;
+};
 
 const EXTRACT_TEMPLATES: Record<string, string[]> = {
   Contrato: [
@@ -172,20 +199,28 @@ export function ContextlyApp() {
   const [input, setInput] = useState('');
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadingStandard, setUploadingStandard] = useState(false);
   const [sending, setSending] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const standardFileRef = useRef<HTMLInputElement | null>(null);
 
-  const [activeTab, setActiveTab] = useState<'chat' | 'extract'>('extract');
+  const [activeTab, setActiveTab] = useState<'chat' | 'extract' | 'compliance'>('extract');
   const [extractFields, setExtractFields] = useState<string[]>([]);
   const [fieldInput, setFieldInput] = useState('');
   const [extracting, setExtracting] = useState(false);
-  const [extractResults, setExtractResults] = useState<ExtractResult[] | null>(
-    null,
-  );
+  const [extractResults, setExtractResults] = useState<ExtractResult[] | null>(null);
   const [extractSources, setExtractSources] = useState<SourceInfo[]>([]);
+
+  const [complianceStandardId, setComplianceStandardId] = useState<string | null>(null);
+  const [complianceAnalysisId, setComplianceAnalysisId] = useState<string | null>(null);
+  const [complianceRunning, setComplianceRunning] = useState(false);
+  const [complianceResult, setComplianceResult] = useState<ComplianceResult | null>(null);
+
+  const analysisDocs = documents.filter((d) => !d.doc_type || d.doc_type === 'analysis');
+  const standardDocs = documents.filter((d) => d.doc_type === 'standard');
 
   const scrollToBottom = () => {
     requestAnimationFrame(() => {
@@ -201,12 +236,13 @@ export function ContextlyApp() {
       if (!res.ok) throw new Error(data.error ?? 'Failed to load');
       const list = (data.documents ?? []) as DocumentRow[];
       setDocuments(list);
+      const analysisList = list.filter((d) => !d.doc_type || d.doc_type === 'analysis');
       setQueryScope((prev) => {
         if (prev.kind === 'all') return prev;
-        const allowed = new Set(list.map((d) => d.id));
+        const allowed = new Set(analysisList.map((d) => d.id));
         const ids = prev.ids.filter((id) => allowed.has(id));
         if (ids.length === 0) return { kind: 'all' };
-        if (ids.length === list.length) return { kind: 'all' };
+        if (ids.length === analysisList.length) return { kind: 'all' };
         return { kind: 'subset', ids };
       });
     } catch (e) {
@@ -224,7 +260,7 @@ export function ContextlyApp() {
   }, [messages, sending]);
 
   const toggleScope = (id: string) => {
-    const allIds = documents.map((d) => d.id);
+    const allIds = analysisDocs.map((d) => d.id);
     setQueryScope((prev) => {
       if (prev.kind === 'all') {
         return { kind: 'subset', ids: allIds.filter((x) => x !== id) };
@@ -240,27 +276,32 @@ export function ContextlyApp() {
   };
 
   const onUploadClick = () => fileInputRef.current?.click();
+  const onStandardUploadClick = () => standardFileRef.current?.click();
+
+  const uploadFiles = async (list: File[], docType: 'analysis' | 'standard') => {
+    const errors: string[] = [];
+    for (const file of list) {
+      try {
+        const fd = new FormData();
+        fd.set('file', file);
+        fd.set('docType', docType);
+        const res = await fetch('/api/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? 'Upload failed');
+      } catch (err) {
+        errors.push(`${err instanceof Error ? err.message : 'Falha'} — ${file.name}`);
+      }
+    }
+    return errors;
+  };
 
   const onFileSelected = async (e: ChangeEvent<HTMLInputElement>) => {
     const list = Array.from(e.target.files ?? []);
     e.target.value = '';
     if (list.length === 0) return;
     setUploading(true);
-    const errors: string[] = [];
     try {
-      for (const file of list) {
-        try {
-          const fd = new FormData();
-          fd.set('file', file);
-          const res = await fetch('/api/upload', { method: 'POST', body: fd });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? 'Upload failed');
-        } catch (err) {
-          errors.push(
-            `${err instanceof Error ? err.message : 'Falha'} — ${file.name}`,
-          );
-        }
-      }
+      const errors = await uploadFiles(list, 'analysis');
       await loadDocuments();
       if (list.length > errors.length) setQueryScope({ kind: 'all' });
       if (errors.length > 0) {
@@ -276,6 +317,27 @@ export function ContextlyApp() {
     }
   };
 
+  const onStandardFileSelected = async (e: ChangeEvent<HTMLInputElement>) => {
+    const list = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (list.length === 0) return;
+    setUploadingStandard(true);
+    try {
+      const errors = await uploadFiles(list, 'standard');
+      await loadDocuments();
+      if (errors.length > 0) {
+        const ok = list.length - errors.length;
+        alert(
+          (ok > 0
+            ? `${ok} arquivo(s) OK, ${errors.length} com erro:\n\n`
+            : 'Nenhum arquivo enviado:\n\n') + errors.join('\n'),
+        );
+      }
+    } finally {
+      setUploadingStandard(false);
+    }
+  };
+
   const deleteDocument = async (id: string) => {
     if (!confirm('Remover este documento da base de conhecimento?')) return;
     try {
@@ -286,6 +348,8 @@ export function ContextlyApp() {
         const ids = prev.ids.filter((x) => x !== id);
         return ids.length === 0 ? { kind: 'all' } : { kind: 'subset', ids };
       });
+      if (complianceStandardId === id) setComplianceStandardId(null);
+      if (complianceAnalysisId === id) setComplianceAnalysisId(null);
       await loadDocuments();
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Erro ao remover');
@@ -312,7 +376,12 @@ export function ContextlyApp() {
     ]);
     setInput('');
     setSending(true);
-    const documentIds = queryScope.kind === 'all' ? null : queryScope.ids;
+
+    const documentIds =
+      queryScope.kind === 'all'
+        ? analysisDocs.map((d) => d.id)
+        : queryScope.ids;
+
     const history = messages
       .filter((m) => m.content.trim())
       .map((m) => ({
@@ -345,11 +414,7 @@ export function ContextlyApp() {
           idx = buf.indexOf('\n');
           if (!line) continue;
           const evt = JSON.parse(line) as
-            | {
-                type: 'sources';
-                sources: SourceInfo[];
-                reasoning?: RetrievalReasoning;
-              }
+            | { type: 'sources'; sources: SourceInfo[]; reasoning?: RetrievalReasoning }
             | { type: 'text'; text: string }
             | { type: 'done' }
             | { type: 'error'; message: string };
@@ -357,20 +422,14 @@ export function ContextlyApp() {
             setMessages((prev) =>
               prev.map((x) =>
                 x.id === assistantId
-                  ? {
-                      ...x,
-                      sources: evt.sources,
-                      reasoning: evt.reasoning ?? x.reasoning,
-                    }
+                  ? { ...x, sources: evt.sources, reasoning: evt.reasoning ?? x.reasoning }
                   : x,
               ),
             );
           } else if (evt.type === 'text') {
             setMessages((prev) =>
               prev.map((x) =>
-                x.id === assistantId
-                  ? { ...x, content: x.content + evt.text }
-                  : x,
+                x.id === assistantId ? { ...x, content: x.content + evt.text } : x,
               ),
             );
           } else if (evt.type === 'error') {
@@ -419,7 +478,10 @@ export function ContextlyApp() {
     setExtractResults(null);
     setExtractSources([]);
     try {
-      const documentIds = queryScope.kind === 'all' ? null : queryScope.ids;
+      const documentIds =
+        queryScope.kind === 'all'
+          ? analysisDocs.map((d) => d.id)
+          : queryScope.ids;
       const res = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -436,26 +498,47 @@ export function ContextlyApp() {
     }
   };
 
+  // ── compliance ───────────────────────────────────────────────────────────────
+
+  const runCompliance = async () => {
+    if (!complianceStandardId || !complianceAnalysisId || complianceRunning) return;
+    setComplianceRunning(true);
+    setComplianceResult(null);
+    try {
+      const res = await fetch('/api/compliance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          standardDocId: complianceStandardId,
+          analysisDocId: complianceAnalysisId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Falha na verificação');
+      setComplianceResult(data as ComplianceResult);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Erro na verificação de conformidade');
+    } finally {
+      setComplianceRunning(false);
+    }
+  };
+
   // ── sidebar ─────────────────────────────────────────────────────────────────
 
   const sidebarContent = (
     <div className='flex h-full flex-col'>
-      {/* header */}
       <div className='flex items-center gap-3 px-4 py-4'>
         <div className='flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground'>
           <Sparkles className='size-4' aria-hidden />
         </div>
         <div className='min-w-0'>
           <p className='text-sm font-semibold tracking-tight'>Contextly</p>
-          <p className='text-[11px] text-muted-foreground'>
-            Base de documentos
-          </p>
+          <p className='text-[11px] text-muted-foreground'>Base de documentos</p>
         </div>
       </div>
 
       <Separator />
 
-      {/* upload */}
       <div className='p-3'>
         <input
           ref={fileInputRef}
@@ -465,11 +548,7 @@ export function ContextlyApp() {
           className='hidden'
           onChange={onFileSelected}
         />
-        <Button
-          className='w-full gap-2'
-          onClick={onUploadClick}
-          disabled={uploading}
-        >
+        <Button className='w-full gap-2' onClick={onUploadClick} disabled={uploading}>
           {uploading ? (
             <Loader2 className='size-4 animate-spin' />
           ) : (
@@ -481,7 +560,6 @@ export function ContextlyApp() {
 
       <Separator />
 
-      {/* document list */}
       <div className='flex items-center justify-between px-4 py-2'>
         <span className='text-[11px] font-semibold uppercase tracking-widest text-muted-foreground'>
           Documentos
@@ -490,11 +568,8 @@ export function ContextlyApp() {
           {loadingDocs ? (
             <Loader2 className='size-3 animate-spin text-muted-foreground' />
           ) : (
-            <Badge
-              variant='secondary'
-              className='h-4 px-1.5 text-[10px] font-semibold'
-            >
-              {documents.length}
+            <Badge variant='secondary' className='h-4 px-1.5 text-[10px] font-semibold'>
+              {analysisDocs.length}
             </Badge>
           )}
         </div>
@@ -502,12 +577,12 @@ export function ContextlyApp() {
 
       <ScrollArea className='min-h-0 flex-1 px-2 pb-2'>
         <ul className='space-y-0.5'>
-          {documents.length === 0 && !loadingDocs ? (
+          {analysisDocs.length === 0 && !loadingDocs ? (
             <li className='px-2 py-6 text-center text-xs text-muted-foreground'>
               Nenhum documento ainda.
             </li>
           ) : null}
-          {documents.map((d) => {
+          {analysisDocs.map((d) => {
             const checked =
               queryScope.kind === 'all' || queryScope.ids.includes(d.id);
             return (
@@ -522,10 +597,7 @@ export function ContextlyApp() {
                   className='shrink-0 rounded border-input accent-primary cursor-pointer'
                 />
                 <div className='min-w-0 flex-1'>
-                  <p
-                    className='truncate text-[13px] font-medium leading-tight'
-                    title={d.name}
-                  >
+                  <p className='truncate text-[13px] font-medium leading-tight' title={d.name}>
                     {d.name}
                   </p>
                   <p className='text-[10px] text-muted-foreground'>
@@ -547,14 +619,11 @@ export function ContextlyApp() {
         </ul>
       </ScrollArea>
 
-      {/* scope hint */}
       {queryScope.kind === 'subset' && (
         <div className='border-t border-border px-3 py-2'>
           <p className='text-[11px] text-muted-foreground'>
-            <span className='font-semibold text-primary'>
-              {queryScope.ids.length}
-            </span>{' '}
-            de {documents.length} selecionados
+            <span className='font-semibold text-primary'>{queryScope.ids.length}</span>{' '}
+            de {analysisDocs.length} selecionados
           </p>
         </div>
       )}
@@ -574,8 +643,7 @@ export function ContextlyApp() {
                 Converse com seus documentos
               </h2>
               <p className='mt-1.5 text-sm text-muted-foreground'>
-                Faça perguntas e receba respostas embasadas nos documentos
-                carregados.
+                Faça perguntas e receba respostas embasadas nos documentos carregados.
               </p>
             </div>
           ) : null}
@@ -621,10 +689,7 @@ export function ContextlyApp() {
               {m.role === 'assistant' && (m.reasoning || m.sources?.length) ? (
                 <div className='flex w-full max-w-[85%] flex-col gap-2'>
                   {m.reasoning ? (
-                    <CollapsibleBlock
-                      title='Como chegamos aqui'
-                      icon={BrainCircuit}
-                    >
+                    <CollapsibleBlock title='Como chegamos aqui' icon={BrainCircuit}>
                       <p className='mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground'>
                         {m.reasoning.scopeLabel} · modelo {m.reasoning.model}
                       </p>
@@ -640,16 +705,12 @@ export function ContextlyApp() {
                     icon={FileText}
                   >
                     {!m.sources?.length ? (
-                      <p className='text-xs text-muted-foreground'>
-                        Nenhum trecho recuperado.
-                      </p>
+                      <p className='text-xs text-muted-foreground'>Nenhum trecho recuperado.</p>
                     ) : (
                       <ul className='space-y-4'>
                         {m.sources.map((s, i) => {
                           const rank = i + 1;
-                          const proxVec = (
-                            Math.min(1, Math.max(0, s.similarity)) * 100
-                          ).toFixed(1);
+                          const proxVec = (Math.min(1, Math.max(0, s.similarity)) * 100).toFixed(1);
                           const rs = s.rerankScore;
                           const hasRerank = rs !== undefined;
                           const proxRerank = hasRerank
@@ -665,26 +726,19 @@ export function ContextlyApp() {
                               </div>
                               <div className='min-w-0 flex-1 space-y-1.5'>
                                 <div>
-                                  <p className='font-medium text-foreground'>
-                                    {s.documentName}
-                                  </p>
+                                  <p className='font-medium text-foreground'>{s.documentName}</p>
                                   <p className='text-[11px] text-muted-foreground'>
                                     Trecho nº {s.chunkIndex + 1}
                                   </p>
                                 </div>
                                 <div className='flex flex-wrap items-center gap-1.5'>
                                   {hasRerank ? (
-                                    <Badge
-                                      variant='secondary'
-                                      className='font-normal'
-                                    >
+                                    <Badge variant='secondary' className='font-normal'>
                                       Rerank: {proxRerank}%
                                     </Badge>
                                   ) : null}
                                   <Badge
-                                    variant={
-                                      hasRerank ? 'outline' : 'secondary'
-                                    }
+                                    variant={hasRerank ? 'outline' : 'secondary'}
                                     className='font-normal'
                                   >
                                     Vetorial: {proxVec}%
@@ -754,28 +808,22 @@ export function ContextlyApp() {
   const extractPanel = (
     <ScrollArea className='min-h-0 flex-1'>
       <div className='mx-auto flex max-w-3xl flex-col gap-6 px-4 py-8'>
-        {/* hero */}
         <div className='rounded-2xl border border-border bg-muted/20 px-6 py-6'>
           <div className='flex items-center gap-3 mb-2'>
             <div className='flex size-9 items-center justify-center rounded-xl bg-primary/10'>
               <Zap className='size-5 text-primary' aria-hidden />
             </div>
             <div>
-              <h2 className='text-base font-semibold tracking-tight'>
-                Extração de Dados
-              </h2>
-              <p className='text-xs text-muted-foreground'>
-                ArchonAI · Powered by RAG
-              </p>
+              <h2 className='text-base font-semibold tracking-tight'>Extração de Dados</h2>
+              <p className='text-xs text-muted-foreground'>ArchonAI · Powered by RAG</p>
             </div>
           </div>
           <p className='text-sm text-muted-foreground leading-relaxed'>
-            Selecione um template ou adicione os campos que deseja extrair. O
-            sistema localiza e retorna as informações diretamente do documento.
+            Selecione um template ou adicione os campos que deseja extrair. O sistema localiza e
+            retorna as informações diretamente do documento.
           </p>
         </div>
 
-        {/* templates */}
         <div>
           <p className='mb-2.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground'>
             Templates
@@ -798,7 +846,6 @@ export function ContextlyApp() {
           </div>
         </div>
 
-        {/* fields */}
         <div>
           <p className='mb-2.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground'>
             Campos selecionados
@@ -855,7 +902,6 @@ export function ContextlyApp() {
           </div>
         </div>
 
-        {/* action */}
         <Button
           onClick={() => void runExtract()}
           disabled={extracting || extractFields.length === 0}
@@ -870,51 +916,41 @@ export function ContextlyApp() {
           {extracting ? 'Extraindo…' : 'Extrair Campos'}
         </Button>
 
-        {/* results */}
         {extractResults && (
           <div className='overflow-hidden rounded-2xl border border-border bg-card shadow-sm'>
             <div className='flex items-center gap-2.5 border-b border-border bg-muted/30 px-5 py-3.5'>
               <Sparkles className='size-4 text-primary' aria-hidden />
-              <span className='text-sm font-semibold'>
-                Resultado da Extração
-              </span>
+              <span className='text-sm font-semibold'>Resultado da Extração</span>
               <Badge
                 variant={
-                  extractResults.filter((r) => r.value !== null).length ===
-                  extractResults.length
+                  extractResults.filter((r) => r.value !== null).length === extractResults.length
                     ? 'default'
                     : 'secondary'
                 }
                 className='ml-auto text-[11px]'
               >
-                {extractResults.filter((r) => r.value !== null).length}/
-                {extractResults.length} encontrados
+                {extractResults.filter((r) => r.value !== null).length}/{extractResults.length}{' '}
+                encontrados
               </Badge>
             </div>
             <div className='divide-y divide-border'>
               {extractResults.map(({ field, value }) => {
                 const isEmpty =
-                  value === null ||
-                  (Array.isArray(value) && value.length === 0);
+                  value === null || (Array.isArray(value) && value.length === 0);
                 const isMulti = Array.isArray(value) && value.length > 1;
                 return (
                   <div key={field} className='flex items-start gap-4 px-5 py-3'>
                     <span className='flex w-44 shrink-0 items-start gap-1.5 pt-0.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground'>
                       {field}
                       {isMulti && (
-                        <Badge
-                          variant='secondary'
-                          className='h-3.5 shrink-0 px-1 text-[10px]'
-                        >
+                        <Badge variant='secondary' className='h-3.5 shrink-0 px-1 text-[10px]'>
                           {(value as string[]).length}
                         </Badge>
                       )}
                     </span>
                     <div className='flex-1 text-sm leading-relaxed'>
                       {isEmpty ? (
-                        <span className='italic text-muted-foreground/50'>
-                          Não encontrado
-                        </span>
+                        <span className='italic text-muted-foreground/50'>Não encontrado</span>
                       ) : isMulti ? (
                         <ul className='space-y-1'>
                           {(value as string[]).map((v, i) => (
@@ -937,7 +973,6 @@ export function ContextlyApp() {
           </div>
         )}
 
-        {/* sources */}
         {extractResults && extractSources.length > 0 && (
           <CollapsibleBlock
             title={`Trechos consultados (${extractSources.length})`}
@@ -950,12 +985,9 @@ export function ContextlyApp() {
                     {i + 1}
                   </div>
                   <div className='min-w-0 space-y-1'>
-                    <p className='font-medium text-foreground'>
-                      {s.documentName}
-                    </p>
+                    <p className='font-medium text-foreground'>{s.documentName}</p>
                     <p className='text-[11px] text-muted-foreground'>
-                      Trecho nº {s.chunkIndex + 1} ·{' '}
-                      {(s.similarity * 100).toFixed(1)}% similaridade
+                      Trecho nº {s.chunkIndex + 1} · {(s.similarity * 100).toFixed(1)}% similaridade
                     </p>
                     <p className='leading-relaxed text-muted-foreground'>
                       {s.preview}
@@ -971,11 +1003,346 @@ export function ContextlyApp() {
     </ScrollArea>
   );
 
+  // ── compliance panel ─────────────────────────────────────────────────────────
+
+  const statusConfig = {
+    conforme: {
+      icon: CheckCircle2,
+      label: 'Conforme',
+      colorClass: 'text-emerald-600 dark:text-emerald-400',
+      bgClass: 'bg-emerald-50 dark:bg-emerald-950/30',
+      borderClass: 'border-emerald-200 dark:border-emerald-800',
+      barClass: 'bg-emerald-500',
+    },
+    parcialmente_conforme: {
+      icon: AlertCircle,
+      label: 'Parcialmente Conforme',
+      colorClass: 'text-amber-600 dark:text-amber-400',
+      bgClass: 'bg-amber-50 dark:bg-amber-950/30',
+      borderClass: 'border-amber-200 dark:border-amber-800',
+      barClass: 'bg-amber-500',
+    },
+    nao_conforme: {
+      icon: AlertTriangle,
+      label: 'Não Conforme',
+      colorClass: 'text-red-600 dark:text-red-400',
+      bgClass: 'bg-red-50 dark:bg-red-950/30',
+      borderClass: 'border-red-200 dark:border-red-800',
+      barClass: 'bg-red-500',
+    },
+  } as const;
+
+  const gravidadeConfig = {
+    alta: { label: 'Alta', className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400' },
+    media: { label: 'Média', className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400' },
+    baixa: { label: 'Baixa', className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400' },
+  } as const;
+
+  const compliancePanel = (
+    <ScrollArea className='min-h-0 flex-1'>
+      <div className='mx-auto flex max-w-3xl flex-col gap-6 px-4 py-8'>
+        {/* hero */}
+        <div className='rounded-2xl border border-border bg-muted/20 px-6 py-6'>
+          <div className='flex items-center gap-3 mb-2'>
+            <div className='flex size-9 items-center justify-center rounded-xl bg-primary/10'>
+              <ShieldCheck className='size-5 text-primary' aria-hidden />
+            </div>
+            <div>
+              <h2 className='text-base font-semibold tracking-tight'>
+                Verificação de Conformidade
+              </h2>
+              <p className='text-xs text-muted-foreground'>
+                Compare documentos com o padrão de referência
+              </p>
+            </div>
+          </div>
+          <p className='text-sm text-muted-foreground leading-relaxed'>
+            Cadastre documentos padrão e compare qualquer documento enviado contra eles. O sistema
+            identifica divergências, cláusulas ausentes e não-conformidades automaticamente.
+          </p>
+        </div>
+
+        {/* standard docs management */}
+        <div>
+          <div className='flex items-center justify-between mb-2.5'>
+            <p className='text-xs font-semibold uppercase tracking-widest text-muted-foreground'>
+              Biblioteca de Padrões
+            </p>
+            <input
+              ref={standardFileRef}
+              type='file'
+              multiple
+              accept='.pdf,.txt,text/plain,application/pdf'
+              className='hidden'
+              onChange={onStandardFileSelected}
+            />
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={onStandardUploadClick}
+              disabled={uploadingStandard}
+              className='gap-1.5 h-7 text-xs rounded-lg'
+            >
+              {uploadingStandard ? (
+                <Loader2 className='size-3 animate-spin' />
+              ) : (
+                <FileUp className='size-3' />
+              )}
+              Adicionar Padrão
+            </Button>
+          </div>
+
+          {standardDocs.length === 0 ? (
+            <div className='rounded-xl border border-dashed border-border bg-muted/10 px-4 py-8 text-center'>
+              <BookOpen className='mx-auto size-8 text-muted-foreground/30 mb-2' />
+              <p className='text-sm text-muted-foreground'>Nenhum documento padrão ainda.</p>
+              <p className='text-xs text-muted-foreground/60 mt-1'>
+                Clique em &quot;Adicionar Padrão&quot; para cadastrar um modelo de referência.
+              </p>
+            </div>
+          ) : (
+            <ul className='space-y-1.5'>
+              {standardDocs.map((d) => (
+                <li
+                  key={d.id}
+                  className='group flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 hover:bg-muted/30 transition-colors'
+                >
+                  <BookOpen className='size-4 shrink-0 text-primary/60' aria-hidden />
+                  <div className='min-w-0 flex-1'>
+                    <p className='truncate text-sm font-medium leading-tight' title={d.name}>
+                      {d.name}
+                    </p>
+                    <p className='text-[10px] text-muted-foreground'>
+                      {formatDocDate(d.created_at)}
+                    </p>
+                  </div>
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    className='size-7 shrink-0 opacity-0 group-hover:opacity-60 hover:opacity-100! transition-opacity'
+                    onClick={() => void deleteDocument(d.id)}
+                    aria-label={`Remover ${d.name}`}
+                  >
+                    <Trash2 className='size-3.5' />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* compliance run */}
+        <div className='flex flex-col gap-4'>
+          <p className='text-xs font-semibold uppercase tracking-widest text-muted-foreground'>
+            Executar Verificação
+          </p>
+
+          <div className='flex flex-col gap-3'>
+            <div>
+              <label className='mb-1.5 block text-xs font-medium text-foreground'>
+                Documento Padrão (referência)
+              </label>
+              <select
+                value={complianceStandardId ?? ''}
+                onChange={(e) => {
+                  setComplianceStandardId(e.target.value || null);
+                  setComplianceResult(null);
+                }}
+                disabled={standardDocs.length === 0}
+                className='w-full rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50'
+              >
+                <option value=''>
+                  {standardDocs.length === 0
+                    ? 'Nenhum padrão cadastrado…'
+                    : 'Selecione o documento padrão…'}
+                </option>
+                {standardDocs.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className='mb-1.5 block text-xs font-medium text-foreground'>
+                Documento em Análise
+              </label>
+              <select
+                value={complianceAnalysisId ?? ''}
+                onChange={(e) => {
+                  setComplianceAnalysisId(e.target.value || null);
+                  setComplianceResult(null);
+                }}
+                disabled={analysisDocs.length === 0}
+                className='w-full rounded-xl border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50'
+              >
+                <option value=''>
+                  {analysisDocs.length === 0
+                    ? 'Nenhum documento enviado…'
+                    : 'Selecione o documento a verificar…'}
+                </option>
+                {analysisDocs.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <Button
+            onClick={() => void runCompliance()}
+            disabled={complianceRunning || !complianceStandardId || !complianceAnalysisId}
+            className='gap-2 self-start rounded-xl px-5'
+            size='lg'
+          >
+            {complianceRunning ? (
+              <Loader2 className='size-4 animate-spin' />
+            ) : (
+              <ShieldCheck className='size-4' />
+            )}
+            {complianceRunning ? 'Verificando…' : 'Verificar Conformidade'}
+          </Button>
+        </div>
+
+        {/* compliance result */}
+        {complianceResult && (() => {
+          const cfg = statusConfig[complianceResult.status] ?? statusConfig.nao_conforme;
+          const StatusIcon = cfg.icon;
+          return (
+            <div className='flex flex-col gap-4'>
+              {/* status header */}
+              <div
+                className={cn(
+                  'flex items-center gap-4 rounded-2xl border p-5',
+                  cfg.bgClass,
+                  cfg.borderClass,
+                )}
+              >
+                <StatusIcon className={cn('size-8 shrink-0', cfg.colorClass)} aria-hidden />
+                <div className='flex-1 min-w-0'>
+                  <p className={cn('text-base font-bold', cfg.colorClass)}>{cfg.label}</p>
+                  <p className='text-xs text-muted-foreground mt-0.5'>
+                    {complianceResult.analysisName} vs. {complianceResult.standardName}
+                  </p>
+                  <div className='mt-2.5 flex items-center gap-3'>
+                    <div className='flex-1 h-2 rounded-full bg-muted/60 overflow-hidden'>
+                      <div
+                        className={cn('h-full rounded-full transition-[width] duration-700', cfg.barClass)}
+                        style={{ width: `${complianceResult.score}%` }}
+                      />
+                    </div>
+                    <span className={cn('text-sm font-bold tabular-nums shrink-0', cfg.colorClass)}>
+                      {complianceResult.score}/100
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* divergencias */}
+              {complianceResult.divergencias.length > 0 && (
+                <div className='overflow-hidden rounded-2xl border border-border bg-card shadow-sm'>
+                  <div className='flex items-center gap-2.5 border-b border-border bg-muted/30 px-5 py-3.5'>
+                    <AlertCircle className='size-4 text-amber-500' aria-hidden />
+                    <span className='text-sm font-semibold'>Divergências encontradas</span>
+                    <Badge variant='secondary' className='ml-auto text-[11px]'>
+                      {complianceResult.divergencias.length}
+                    </Badge>
+                  </div>
+                  <div className='divide-y divide-border'>
+                    {complianceResult.divergencias.map((div, i) => {
+                      const gcfg = gravidadeConfig[div.gravidade] ?? gravidadeConfig.baixa;
+                      return (
+                        <div key={i} className='flex flex-col gap-2 px-5 py-4'>
+                          <div className='flex items-start justify-between gap-3'>
+                            <p className='text-sm font-semibold text-foreground leading-tight'>
+                              {div.item}
+                            </p>
+                            <span
+                              className={cn(
+                                'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                                gcfg.className,
+                              )}
+                            >
+                              {gcfg.label}
+                            </span>
+                          </div>
+                          <div className='grid grid-cols-2 gap-3 text-xs'>
+                            <div className='rounded-lg bg-muted/40 px-3 py-2'>
+                              <p className='mb-0.5 font-semibold uppercase tracking-wide text-muted-foreground text-[10px]'>
+                                Padrão (esperado)
+                              </p>
+                              <p className='text-foreground leading-relaxed'>{div.esperado}</p>
+                            </div>
+                            <div className='rounded-lg bg-muted/40 px-3 py-2'>
+                              <p className='mb-0.5 font-semibold uppercase tracking-wide text-muted-foreground text-[10px]'>
+                                Encontrado
+                              </p>
+                              <p className='text-foreground leading-relaxed'>{div.encontrado}</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ausencias */}
+              {complianceResult.ausencias.length > 0 && (
+                <div className='overflow-hidden rounded-2xl border border-border bg-card shadow-sm'>
+                  <div className='flex items-center gap-2.5 border-b border-border bg-muted/30 px-5 py-3.5'>
+                    <AlertTriangle className='size-4 text-red-500' aria-hidden />
+                    <span className='text-sm font-semibold'>Itens ausentes</span>
+                    <Badge variant='secondary' className='ml-auto text-[11px]'>
+                      {complianceResult.ausencias.length}
+                    </Badge>
+                  </div>
+                  <ul className='divide-y divide-border'>
+                    {complianceResult.ausencias.map((item, i) => (
+                      <li key={i} className='flex items-start gap-3 px-5 py-3 text-sm'>
+                        <span className='mt-1.5 size-1.5 shrink-0 rounded-full bg-red-400' />
+                        <span className='text-foreground'>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* observacoes */}
+              {complianceResult.observacoes && (
+                <div className='rounded-2xl border border-border bg-muted/20 px-5 py-4'>
+                  <p className='mb-1.5 text-xs font-semibold uppercase tracking-widest text-muted-foreground'>
+                    Observações
+                  </p>
+                  <p className='text-sm text-foreground leading-relaxed'>
+                    {complianceResult.observacoes}
+                  </p>
+                </div>
+              )}
+
+              {/* all-clear */}
+              {complianceResult.divergencias.length === 0 &&
+                complianceResult.ausencias.length === 0 && (
+                  <div className='flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 dark:border-emerald-800 dark:bg-emerald-950/30'>
+                    <CheckCircle2 className='size-5 shrink-0 text-emerald-600 dark:text-emerald-400' />
+                    <p className='text-sm font-medium text-emerald-700 dark:text-emerald-300'>
+                      Nenhuma divergência ou ausência identificada.
+                    </p>
+                  </div>
+                )}
+            </div>
+          );
+        })()}
+      </div>
+    </ScrollArea>
+  );
+
   // ── render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className='flex h-dvh w-full overflow-hidden bg-background'>
-      {/* desktop sidebar — collapsible */}
       <aside
         className={cn(
           'hidden md:flex md:flex-col shrink-0 overflow-hidden border-r border-border',
@@ -987,9 +1354,7 @@ export function ContextlyApp() {
       </aside>
 
       <main className='flex min-w-0 flex-1 flex-col'>
-        {/* top bar — unified for mobile + desktop */}
         <header className='flex shrink-0 py-4 items-stretch border-b border-border bg-background'>
-          {/* mobile: sheet trigger */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger
               render={
@@ -1011,7 +1376,6 @@ export function ContextlyApp() {
             </SheetContent>
           </Sheet>
 
-          {/* desktop: sidebar toggle */}
           <button
             className={cn(
               'hidden md:flex items-center gap-2 px-3 text-sm transition-colors border-r border-border',
@@ -1020,11 +1384,7 @@ export function ContextlyApp() {
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/30',
             )}
             onClick={() => setSidebarOpen((p) => !p)}
-            aria-label={
-              sidebarOpen
-                ? 'Fechar painel de arquivos'
-                : 'Abrir painel de arquivos'
-            }
+            aria-label={sidebarOpen ? 'Fechar painel de arquivos' : 'Abrir painel de arquivos'}
           >
             <PanelLeft
               className={cn(
@@ -1033,17 +1393,13 @@ export function ContextlyApp() {
               )}
             />
             <span className='text-xs font-medium'>Arquivos</span>
-            {documents.length > 0 && (
-              <Badge
-                variant='secondary'
-                className='h-4 px-1.5 text-[10px] font-semibold'
-              >
-                {documents.length}
+            {analysisDocs.length > 0 && (
+              <Badge variant='secondary' className='h-4 px-1.5 text-[10px] font-semibold'>
+                {analysisDocs.length}
               </Badge>
             )}
           </button>
 
-          {/* tabs */}
           <nav className='flex items-stretch'>
             <button
               className={cn(
@@ -1069,10 +1425,31 @@ export function ContextlyApp() {
               <Zap className='size-3.5' />
               Extração ArchonAI
             </button>
+            <button
+              className={cn(
+                'flex items-center gap-2 px-4 text-sm font-medium transition-colors border-b-2 -mb-px',
+                activeTab === 'compliance'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              )}
+              onClick={() => setActiveTab('compliance')}
+            >
+              <ShieldCheck className='size-3.5' />
+              Conformidade
+              {standardDocs.length > 0 && (
+                <Badge variant='secondary' className='h-4 px-1.5 text-[10px] font-semibold'>
+                  {standardDocs.length}
+                </Badge>
+              )}
+            </button>
           </nav>
         </header>
 
-        {activeTab === 'extract' ? extractPanel : chatPanel}
+        {activeTab === 'extract'
+          ? extractPanel
+          : activeTab === 'compliance'
+            ? compliancePanel
+            : chatPanel}
       </main>
     </div>
   );

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\Guilherme\\\\Desktop\\\\Arquivos\\\\Pessoais\\\\Projetos Devs\\\\Balance Organizer\\\\ContextlyArchonAI\\\\src\\\\app\\\\api\\\\compliance\")",
+      "Bash(Out-Null)",
+      "Bash(Write-Host \"done\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\Guilherme\\\\Desktop\\\\Arquivos\\\\Pessoais\\\\Projetos Devs\\\\Balance Organizer\\\\ContextlyArchonAI\\\\src\\\\app\\\\api\\\\compliance\")",
+      "Bash(npx tsc *)"
+    ]
+  }
+}

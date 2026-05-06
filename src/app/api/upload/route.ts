@@ -14,6 +14,8 @@ export async function POST(req: Request) {
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Missing file" }, { status: 400 });
     }
+    const docTypeRaw = form.get("docType");
+    const docType = docTypeRaw === "standard" ? "standard" : "analysis";
 
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
@@ -45,7 +47,7 @@ export async function POST(req: Request) {
 
     const { data: docRow, error: docErr } = await supabase
       .from("documents")
-      .insert({ name: file.name })
+      .insert({ name: file.name, doc_type: docType })
       .select("id")
       .single();
 
